@@ -23,6 +23,8 @@ import { URLNotAllowedError } from '../browser/views';
 import { chatHistoryStore } from '@extension/storage/lib/chat';
 import type { AgentStepHistory } from './history';
 import type { GeneralSettingsConfig } from '@extension/storage';
+import { StructuredSessionCollector } from './session/collector';
+import type { StructuredSession } from './session/types';
 
 const logger = createLogger('Executor');
 
@@ -43,6 +45,7 @@ export class Executor {
   private readonly navigatorPrompt: NavigatorPrompt;
   private readonly validatorPrompt: ValidatorPrompt;
   private readonly generalSettings: GeneralSettingsConfig | undefined;
+  private readonly sessionCollector: StructuredSessionCollector;
   private tasks: string[] = [];
   constructor(
     task: string,
@@ -94,6 +97,8 @@ export class Executor {
     });
 
     this.context = context;
+    // Initialize structured session collector
+    this.sessionCollector = new StructuredSessionCollector(taskId, task, context);
     // Initialize message history
     this.context.messageManager.initTaskMessages(this.navigatorPrompt.getSystemMessage(), task);
   }
@@ -113,6 +118,9 @@ export class Executor {
     // update validator prompt
     this.validatorPrompt.addFollowUpTask(task);
 
+    // Record follow-up task in session
+    this.sessionCollector.addFollowUpTask(task);
+
     // need to reset previous action results that are not included in memory
     this.context.actionResults = this.context.actionResults.filter(result => result.includeInMemory);
   }
@@ -128,6 +136,8 @@ export class Executor {
     const context = this.context;
     context.nSteps = 0;
     const allowedMaxSteps = this.context.options.maxSteps;
+
+    let sessionStatus: 'completed' | 'failed' | 'cancelled' = 'failed';
 
     try {
       this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_START, this.context.taskId);
@@ -149,6 +159,11 @@ export class Executor {
 
         // Run planner if configured
         if (this.planner && (context.nSteps % context.options.planningInterval === 0 || validatorFailed)) {
+          const trigger = step === 0 ? 'initial' : validatorFailed ? 'validator_failed' : 'periodic';
+
+          // Start planning phase
+          this.sessionCollector.startPlanningPhase(trigger, context);
+
           validatorFailed = false;
           // The first planning step is special, we don't want to add the browser state message to memory
           let positionForPlan = 0;
@@ -160,6 +175,10 @@ export class Executor {
           }
 
           const planOutput = await this.planner.execute();
+
+          // Record the plan
+          this.sessionCollector.recordPlan(planOutput.result || null);
+
           if (planOutput.result) {
             // logger.info(`🔄 Planner output: ${JSON.stringify(planOutput.result, null, 2)}`);
             // observation in planner is untrusted content, they are not instructions
@@ -189,6 +208,9 @@ export class Executor {
               break;
             }
           }
+        } else if (context.nSteps === 0) {
+          // No planner for the first step, create an initial phase without plan
+          this.sessionCollector.startPlanningPhase('initial', context);
         }
 
         // execute the navigation step
@@ -199,6 +221,13 @@ export class Executor {
         // validate the output
         if (done && this.context.options.validateOutput && !this.context.stopped && !this.context.paused) {
           const validatorOutput = await this.validator.execute();
+
+          // Record validation result
+          this.sessionCollector.recordValidationResult(
+            validatorOutput.result?.is_valid || false,
+            validatorOutput.result?.reason,
+          );
+
           if (validatorOutput.result?.is_valid) {
             logger.info('✅ Task completed successfully');
             break;
@@ -212,24 +241,43 @@ export class Executor {
         }
       }
 
+      let sessionStatus: 'completed' | 'failed' | 'cancelled' = 'failed';
+
       if (done) {
         this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_OK, this.context.taskId);
+        sessionStatus = 'completed';
       } else if (step >= allowedMaxSteps) {
         logger.info('❌ Task failed: Max steps reached');
         this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_FAIL, 'Task failed: Max steps reached');
+        sessionStatus = 'failed';
       } else if (this.context.stopped) {
         this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_CANCEL, 'Task cancelled');
+        sessionStatus = 'cancelled';
       } else {
         this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_PAUSE, 'Task paused');
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        sessionStatus = 'cancelled';
       }
     } catch (error) {
       if (error instanceof RequestCancelledError) {
         this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_CANCEL, 'Task cancelled');
+        sessionStatus = 'cancelled';
       } else {
         const errorMessage = error instanceof Error ? error.message : String(error);
         this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_FAIL, `Task failed: ${errorMessage}`);
+        sessionStatus = 'failed';
       }
     } finally {
+      // Finish session and save
+      this.sessionCollector.finishSession(sessionStatus);
+
+      try {
+        await StructuredSessionCollector.saveSession(this.sessionCollector.getSession());
+        logger.info(`Structured session saved: ${this.sessionCollector.getSessionId()}`);
+      } catch (error) {
+        logger.error('Failed to save structured session:', error);
+      }
+
       if (import.meta.env.DEV) {
         logger.debug('Executor history', JSON.stringify(this.context.history, null, 2));
       }
@@ -246,26 +294,54 @@ export class Executor {
 
   private async navigate(): Promise<boolean> {
     const context = this.context;
+
+    // Start navigation step
+    this.sessionCollector.startNavigationStep(context);
+
     try {
       // Get and execute navigation action
       // check if the task is paused or stopped
       if (context.paused || context.stopped) {
+        this.sessionCollector.finishNavigationStep(false, context);
         return false;
       }
       const navOutput = await this.navigator.execute();
+
+      // Record actions from context (they are stored there by navigator)
+      if (context.actionResults && context.actionResults.length > 0) {
+        // Only record the new actions from this step
+        const newActions = context.actionResults.slice(-context.options.maxActionsPerStep);
+        newActions.forEach(actionResult => {
+          this.sessionCollector.recordAction(actionResult);
+        });
+      }
+
       // check if the task is paused or stopped
       if (context.paused || context.stopped) {
+        this.sessionCollector.finishNavigationStep(false, context);
         return false;
       }
       context.nSteps++;
       if (navOutput.error) {
+        this.sessionCollector.finishNavigationStep(false, context);
         throw new Error(navOutput.error);
       }
       context.consecutiveFailures = 0;
-      if (navOutput.result?.done) {
-        return true;
-      }
+      const done = navOutput.result?.done || false;
+
+      this.sessionCollector.finishNavigationStep(done, context);
+
+      return done;
     } catch (error) {
+      // Record error and finish step
+      this.sessionCollector.recordAction({
+        action: { type: 'error' },
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+        result: null,
+      });
+      this.sessionCollector.finishNavigationStep(false, context);
+
       logger.error(`Failed to execute step: ${error}`);
       if (
         error instanceof ChatModelAuthError ||
@@ -402,5 +478,13 @@ export class Executor {
     }
 
     return results;
+  }
+
+  getStructuredSession(): StructuredSession {
+    return this.sessionCollector.getSession();
+  }
+
+  getSessionId(): string {
+    return this.sessionCollector.getSessionId();
   }
 }
