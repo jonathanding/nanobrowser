@@ -275,16 +275,15 @@ export class Executor {
         await StructuredSessionCollector.saveSession(this.sessionCollector.getSession());
         logger.info(`Structured session saved: ${this.sessionCollector.getSessionId()}`);
         // Plan Cache MVP save
-        if (this.sessionCollector.getSession().status === 'completed') {
-          try {
-            const { PlanCacheBuilder } = await import('./plan_cache/builder');
-            const { PlanCacheStore } = await import('./plan_cache/store');
-            const plan = PlanCacheBuilder.build(this.sessionCollector.getSession());
-            await PlanCacheStore.save(plan);
-            logger.info('Plan cache (single) saved');
-          } catch (e) {
-            logger.error('Failed to build/save plan cache', e);
-          }
+        // Always cache session (completed or not) for post-mortem analysis
+        try {
+          const { PlanCacheBuilder } = await import('./plan_cache/builder');
+          const { PlanCacheStore } = await import('./plan_cache/store');
+          const plan = PlanCacheBuilder.build(this.sessionCollector.getSession());
+          await PlanCacheStore.save(plan);
+          logger.info('Plan cache (single) saved');
+        } catch (e) {
+          logger.error('Failed to build/save plan cache', e);
         }
       } catch (error) {
         logger.error('Failed to save structured session:', error);

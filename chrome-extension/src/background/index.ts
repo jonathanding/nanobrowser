@@ -222,14 +222,16 @@ chrome.runtime.onConnect.addListener(port => {
           case 'execute_cached_plan': {
             try {
               const { PlanCacheStore } = await import('./agent/plan_cache/store');
-              const plan = await PlanCacheStore.load();
+              const plan = await PlanCacheStore.loadLatest();
               if (!plan) return port.postMessage({ type: 'error', error: 'No cached plan available' });
               if (!message.tabId) return port.postMessage({ type: 'error', error: 'No tab ID provided' });
               await browserContext.switchTab(message.tabId);
               const { ReplayCacheNavigator } = await import('./agent/plan_cache/replay_navigator');
-              const replay = new ReplayCacheNavigator(browserContext, { delayMs: 500 });
+              const replay = new ReplayCacheNavigator(browserContext, { delayMs: 400 });
               port.postMessage({ type: 'cached_plan_status', status: 'running' });
-              const ok = await replay.replay(plan);
+              const ok = await replay.replay(plan, ev => {
+                port.postMessage({ type: 'cached_plan_progress', event: ev });
+              });
               port.postMessage({ type: 'cached_plan_status', status: ok ? 'success' : 'failed' });
             } catch (e) {
               logger.error('execute_cached_plan failed', e);
@@ -245,11 +247,43 @@ chrome.runtime.onConnect.addListener(port => {
           case 'clear_cached_plan': {
             try {
               const { PlanCacheStore } = await import('./agent/plan_cache/store');
-              await PlanCacheStore.clear();
+              await PlanCacheStore.clearAll();
               port.postMessage({ type: 'cached_plan_status', status: 'cleared' });
             } catch (e) {
               logger.error('clear_cached_plan failed', e);
               port.postMessage({ type: 'error', error: e instanceof Error ? e.message : 'Failed to clear cache' });
+            }
+            break;
+          }
+
+          case 'list_cached_plans': {
+            try {
+              const { PlanCacheStore } = await import('./agent/plan_cache/store');
+              const plans = await PlanCacheStore.loadAll();
+              port.postMessage({ type: 'cached_plan_list', plans });
+            } catch (e) {
+              logger.error('list_cached_plans failed', e);
+              port.postMessage({
+                type: 'error',
+                error: e instanceof Error ? e.message : 'Failed to list cached plans',
+              });
+            }
+            break;
+          }
+
+          case 'remove_cached_plan': {
+            try {
+              if (!message.planId) return port.postMessage({ type: 'error', error: 'No planId provided' });
+              const { PlanCacheStore } = await import('./agent/plan_cache/store');
+              await PlanCacheStore.remove(message.planId);
+              const plans = await PlanCacheStore.loadAll();
+              port.postMessage({ type: 'cached_plan_list', plans });
+            } catch (e) {
+              logger.error('remove_cached_plan failed', e);
+              port.postMessage({
+                type: 'error',
+                error: e instanceof Error ? e.message : 'Failed to remove cached plan',
+              });
             }
             break;
           }

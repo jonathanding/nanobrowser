@@ -31,6 +31,14 @@ export interface ReplayOptions {
   delayMs?: number;
 }
 
+export interface ReplayProgressEvent {
+  kind: 'step';
+  stepIndex: number;
+  status: 'running' | 'success' | 'failed';
+  error?: string;
+  failingActionType?: string;
+}
+
 export class ReplayCacheNavigator {
   private context: AgentContext;
   private registry: NavigatorActionRegistry;
@@ -50,36 +58,49 @@ export class ReplayCacheNavigator {
     this.registry = new NavigatorActionRegistry(actionBuilder.buildDefaultActions() as Action[]);
   }
 
-  async replay(plan: CachedPlan): Promise<boolean> {
+  async replay(plan: CachedPlan, onProgress?: (ev: ReplayProgressEvent) => void): Promise<boolean> {
     logger.info(`Replaying plan ${plan.sourceSessionId} with ${plan.steps.length} steps`);
     for (const step of plan.steps) {
-      const ok = await this.executeStep(step);
-      if (!ok) return false;
+      onProgress?.({ kind: 'step', stepIndex: step.index, status: 'running' });
+      const result = await this.executeStep(step);
+      if (!result.ok) {
+        onProgress?.({
+          kind: 'step',
+          stepIndex: step.index,
+          status: 'failed',
+          error: result.error,
+          failingActionType: result.failingActionType,
+        });
+        return false;
+      }
+      onProgress?.({ kind: 'step', stepIndex: step.index, status: 'success' });
     }
     return true;
   }
 
-  private async executeStep(step: CachedPlanStep): Promise<boolean> {
+  private async executeStep(
+    step: CachedPlanStep,
+  ): Promise<{ ok: boolean; error?: string; failingActionType?: string }> {
     this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.STEP_START, `Replay step ${step.index}`);
     for (const action of step.actions) {
-      const ok = await this.executeAction(action);
-      if (!ok) {
+      const result = await this.executeAction(action);
+      if (!result.ok) {
         this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.STEP_FAIL, `Replay failed action ${action.type}`);
-        return false;
+        return { ok: false, error: result.error, failingActionType: action.type };
       }
     }
     this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.STEP_OK, `Replay step ${step.index} done`);
-    return true;
+    return { ok: true };
   }
 
-  private async executeAction(action: CachedAction): Promise<boolean> {
+  private async executeAction(action: CachedAction): Promise<{ ok: boolean; error?: string }> {
     const mapped = ACTION_NAME_MAP[action.type] || action.type;
     const actionInstance = (this.registry as unknown as { getAction(name: string): Action | undefined }).getAction(
       mapped,
     );
     if (!actionInstance) {
       logger.warning('Unknown cached action, skip', action.type);
-      return true; // skip unknown
+      return { ok: true }; // skip unknown
     }
     let input: Record<string, unknown> = action.rawParams ? { ...action.rawParams } : {};
     if (Object.keys(input).length === 0) {
@@ -91,12 +112,12 @@ export class ReplayCacheNavigator {
     }
     try {
       const result = await actionInstance.call(input);
-      if (result?.error) return false;
+      if (result?.error) return { ok: false, error: String(result.error) };
       if (this.options.delayMs) await new Promise(r => setTimeout(r, this.options.delayMs));
-      return true;
+      return { ok: true };
     } catch (e) {
       logger.error('Replay action error', action.type, e);
-      return false;
+      return { ok: false, error: e instanceof Error ? e.message : 'Action threw error' };
     }
   }
 }

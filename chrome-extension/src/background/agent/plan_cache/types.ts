@@ -7,6 +7,8 @@ export interface CachedAction {
   keys?: string;
   index?: number;
   rawParams?: Record<string, unknown>; // original primitive params for richer replay
+  success?: boolean;
+  error?: string;
 }
 
 export interface CachedPlanStep {
@@ -17,6 +19,7 @@ export interface CachedPlanStep {
 }
 
 export interface CachedPlan {
+  planId?: string; // unique identifier (defaults to sessionId)
   cachedAt: number;
   sourceSessionId: string;
   task: string;

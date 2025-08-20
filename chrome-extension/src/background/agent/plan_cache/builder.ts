@@ -22,6 +22,8 @@ export class PlanCacheBuilder {
               keys: typeof a.parameters.keys === 'string' ? a.parameters.keys : undefined,
               index: idx,
               rawParams: a.parameters,
+              success: a.success,
+              error: typeof a.error === 'string' ? a.error : undefined,
             };
           });
 
@@ -76,6 +78,7 @@ export class PlanCacheBuilder {
       }
     }
     return {
+      planId: session.sessionId, // reuse session id for uniqueness for now
       cachedAt: Date.now(),
       sourceSessionId: session.sessionId,
       task: session.task,
