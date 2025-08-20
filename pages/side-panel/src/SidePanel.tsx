@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { RxDiscordLogo } from 'react-icons/rx';
-import { FiSettings } from 'react-icons/fi';
+import { FiSettings, FiRefreshCw } from 'react-icons/fi';
 import { PiPlusBold } from 'react-icons/pi';
 import { GrHistory } from 'react-icons/gr';
 import { MdAnalytics } from 'react-icons/md';
@@ -30,6 +30,7 @@ const SidePanel = () => {
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [showSessionViewer, setShowSessionViewer] = useState(false);
+  const [cacheExecutionLoading, setCacheExecutionLoading] = useState(false);
   const [chatSessions, setChatSessions] = useState<Array<{ id: string; title: string; createdAt: number }>>([]);
   const [isFollowUpMode, setIsFollowUpMode] = useState(false);
   const [isHistoricalSession, setIsHistoricalSession] = useState(false);
@@ -1053,6 +1054,25 @@ const SidePanel = () => {
                   aria-label="View AI Sessions"
                   tabIndex={0}>
                   <MdAnalytics size={20} />
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setCacheExecutionLoading(true);
+                    try {
+                      const port = portRef.current;
+                      if (port) {
+                        port.postMessage({ type: 'use_cached_plan' });
+                      }
+                    } finally {
+                      setTimeout(() => setCacheExecutionLoading(false), 600);
+                    }
+                  }}
+                  onKeyDown={e => e.key === 'Enter'}
+                  className={`header-icon ${isDarkMode ? 'text-sky-400 hover:text-sky-300' : 'text-sky-400 hover:text-sky-500'} cursor-pointer`}
+                  aria-label="Execute Cached Plan"
+                  tabIndex={0}>
+                  <FiRefreshCw size={20} className={cacheExecutionLoading ? 'animate-spin' : ''} />
                 </button>
               </>
             )}

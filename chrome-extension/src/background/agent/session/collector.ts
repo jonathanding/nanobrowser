@@ -14,6 +14,9 @@ export class StructuredSessionCollector {
   private stepsSinceLastPlan = 0;
 
   constructor(taskId: string, task: string, context: AgentContext) {
+    console.log('🔥 StructuredSessionCollector constructor called', { taskId, task });
+    logger.info('Initializing StructuredSessionCollector', { taskId, task });
+
     this.session = {
       sessionId: `session_${taskId}_${Date.now()}`,
       taskId,
@@ -45,6 +48,8 @@ export class StructuredSessionCollector {
         commonErrors: [],
       },
     };
+
+    console.log('🔥 StructuredSessionCollector initialized', this.session.sessionId);
   }
 
   addFollowUpTask(task: string): void {
@@ -84,6 +89,13 @@ export class StructuredSessionCollector {
     }
 
     this.currentPhase.plan = plan;
+    if (plan) {
+      try {
+        this.currentPhase.plannerModelOutput = JSON.stringify(plan);
+      } catch {
+        this.currentPhase.plannerModelOutput = undefined;
+      }
+    }
     logger.debug(`Recorded plan for phase ${this.currentPhase.phaseNumber}:`, {
       done: plan?.done,
       webTask: plan?.web_task,
@@ -122,15 +134,18 @@ export class StructuredSessionCollector {
       return;
     }
 
+    // Preserve original action object if available (llm chosen action before execution)
+    const original = actionResult?.action || {};
     const action = {
-      type: actionResult?.action?.type || 'unknown',
-      parameters: actionResult?.action?.parameters || {},
+      type: original.type || actionResult?.action?.type || 'unknown',
+      rawName: original.type || 'unknown',
+      parameters: original.parameters || actionResult?.action?.parameters || {},
       result: actionResult?.result,
       success: Boolean(actionResult?.success),
       error: actionResult?.error,
       duration: actionResult?.duration,
       toolCallId: actionResult?.toolCallId,
-    };
+    } as const;
 
     this.currentStep.actions.push(action);
 
@@ -153,6 +168,7 @@ export class StructuredSessionCollector {
     this.currentStep.output = {
       done,
       newBrowserState: this.getCurrentBrowserState(context),
+      navigatorModelOutput: context.lastNavigatorModelOutput,
     };
 
     this.currentPhase.navigationSteps.push(this.currentStep);
@@ -188,6 +204,7 @@ export class StructuredSessionCollector {
   }
 
   finishSession(status: 'completed' | 'failed' | 'cancelled'): void {
+    console.log('🔥 finishSession called', status, this.session.sessionId);
     // Finish current phase if exists
     if (this.currentPhase) {
       this.finishPlanningPhase();
@@ -197,6 +214,7 @@ export class StructuredSessionCollector {
     this.session.endTime = Date.now();
     this.updateSummary();
 
+    console.log('🔥 Session finished with summary:', this.session.summary);
     logger.info(`Finished session ${this.session.sessionId} with status: ${status}`, {
       phases: this.session.summary.totalPlanningPhases,
       steps: this.session.summary.totalNavigationSteps,
@@ -282,14 +300,18 @@ export class StructuredSessionCollector {
   // Static methods for storage
   static async saveSession(session: StructuredSession): Promise<void> {
     try {
+      console.log('🔥 saveSession called', session.sessionId, session);
       const key = `structured_session_${session.sessionId}`;
       await chrome.storage.local.set({ [key]: session });
+      console.log('🔥 Session saved to chrome storage', key);
 
       // Update index
       await this.updateSessionIndex(session);
+      console.log('🔥 Session index updated');
 
       logger.info(`Structured session saved: ${session.sessionId}`);
     } catch (error) {
+      console.error('🔥 Failed to save structured session:', error);
       logger.error('Failed to save structured session:', error);
       throw error;
     }
@@ -321,8 +343,10 @@ export class StructuredSessionCollector {
     const indexKey = 'structured_sessions_index';
 
     try {
+      console.log('🔥 updateSessionIndex called', session.sessionId);
       const result = await chrome.storage.local.get(indexKey);
       const index = result[indexKey] || [];
+      console.log('🔥 Current index length:', index.length);
 
       const indexItem = {
         sessionId: session.sessionId,
@@ -337,6 +361,8 @@ export class StructuredSessionCollector {
         successRate: Math.round(session.summary.successRate * 100),
       };
 
+      console.log('🔥 Index item created:', indexItem);
+
       // Remove existing entry if it exists
       const filteredIndex = index.filter((item: SessionIndex) => item.sessionId !== session.sessionId);
       filteredIndex.push(indexItem);
@@ -345,8 +371,11 @@ export class StructuredSessionCollector {
       filteredIndex.sort((a: SessionIndex, b: SessionIndex) => b.timestamp - a.timestamp);
       const trimmedIndex = filteredIndex.slice(0, 100);
 
+      console.log('🔥 Final index length:', trimmedIndex.length);
       await chrome.storage.local.set({ [indexKey]: trimmedIndex });
+      console.log('🔥 Index saved to storage');
     } catch (error) {
+      console.error('🔥 Failed to update structured session index:', error);
       logger.error('Failed to update structured session index:', error);
     }
   }

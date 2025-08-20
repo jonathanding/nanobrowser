@@ -241,7 +241,7 @@ export class Executor {
         }
       }
 
-      let sessionStatus: 'completed' | 'failed' | 'cancelled' = 'failed';
+      // sessionStatus handled by outer scope
 
       if (done) {
         this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_OK, this.context.taskId);
@@ -274,6 +274,18 @@ export class Executor {
       try {
         await StructuredSessionCollector.saveSession(this.sessionCollector.getSession());
         logger.info(`Structured session saved: ${this.sessionCollector.getSessionId()}`);
+        // Plan Cache MVP save
+        if (this.sessionCollector.getSession().status === 'completed') {
+          try {
+            const { PlanCacheBuilder } = await import('./plan_cache/builder');
+            const { PlanCacheStore } = await import('./plan_cache/store');
+            const plan = PlanCacheBuilder.build(this.sessionCollector.getSession());
+            await PlanCacheStore.save(plan);
+            logger.info('Plan cache (single) saved');
+          } catch (e) {
+            logger.error('Failed to build/save plan cache', e);
+          }
+        }
       } catch (error) {
         logger.error('Failed to save structured session:', error);
       }

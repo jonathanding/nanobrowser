@@ -21,6 +21,7 @@ export interface NavigationStep {
   };
   actions: {
     type: string;
+    rawName?: string;
     parameters: Record<string, unknown>;
     result: unknown;
     success: boolean;
@@ -31,6 +32,7 @@ export interface NavigationStep {
   output: {
     done: boolean;
     newBrowserState?: BrowserStateSnapshot;
+    navigatorModelOutput?: string;
   };
 }
 
@@ -45,6 +47,7 @@ export interface PlanningPhase {
   };
   plan: PlannerOutput | null;
   navigationSteps: NavigationStep[];
+  plannerModelOutput?: string; // raw planner LLM JSON/string
   validationResult?: {
     isValid: boolean;
     feedback?: string;

@@ -219,6 +219,41 @@ chrome.runtime.onConnect.addListener(port => {
             break;
           }
 
+          case 'execute_cached_plan': {
+            try {
+              const { PlanCacheStore } = await import('./agent/plan_cache/store');
+              const plan = await PlanCacheStore.load();
+              if (!plan) return port.postMessage({ type: 'error', error: 'No cached plan available' });
+              if (!message.tabId) return port.postMessage({ type: 'error', error: 'No tab ID provided' });
+              await browserContext.switchTab(message.tabId);
+              const { ReplayCacheNavigator } = await import('./agent/plan_cache/replay_navigator');
+              const replay = new ReplayCacheNavigator(browserContext, { delayMs: 500 });
+              port.postMessage({ type: 'cached_plan_status', status: 'running' });
+              const ok = await replay.replay(plan);
+              port.postMessage({ type: 'cached_plan_status', status: ok ? 'success' : 'failed' });
+            } catch (e) {
+              logger.error('execute_cached_plan failed', e);
+              port.postMessage({
+                type: 'cached_plan_status',
+                status: 'failed',
+                error: e instanceof Error ? e.message : 'Unknown error',
+              });
+            }
+            break;
+          }
+
+          case 'clear_cached_plan': {
+            try {
+              const { PlanCacheStore } = await import('./agent/plan_cache/store');
+              await PlanCacheStore.clear();
+              port.postMessage({ type: 'cached_plan_status', status: 'cleared' });
+            } catch (e) {
+              logger.error('clear_cached_plan failed', e);
+              port.postMessage({ type: 'error', error: e instanceof Error ? e.message : 'Failed to clear cache' });
+            }
+            break;
+          }
+
           default:
             return port.postMessage({ type: 'error', error: 'Unknown message type' });
         }

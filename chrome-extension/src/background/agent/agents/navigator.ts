@@ -180,6 +180,7 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
       const actions = this.fixActions(modelOutput);
       modelOutput.action = actions;
       modelOutputString = JSON.stringify(modelOutput);
+      this.context.lastNavigatorModelOutput = modelOutputString;
 
       // remove the last state message from memory before adding the model output
       this.removeLastStateMessageFromMemory();
