@@ -222,9 +222,124 @@ chrome.runtime.onConnect.addListener(port => {
           case 'execute_cached_plan': {
             try {
               const { PlanCacheStore } = await import('./agent/plan_cache/store');
-              const plan = await PlanCacheStore.loadLatest();
+              let plan = await PlanCacheStore.loadLatest();
               if (!plan) return port.postMessage({ type: 'error', error: 'No cached plan available' });
               if (!message.tabId) return port.postMessage({ type: 'error', error: 'No tab ID provided' });
+              // Optional updated task flow
+              if (message.newTask && typeof message.newTask === 'string' && message.newTask.trim().length > 0) {
+                try {
+                  const startUpdate = Date.now();
+                  const { agentModelStore, llmProviderStore, AgentNameEnum } = await import('@extension/storage');
+                  const { planUpdaterSystemPromptTemplate } = await import('./agent/prompts/templates/plan_updater');
+                  const agentModels = await agentModelStore.getAllAgentModels();
+                  const updaterModel = agentModels[AgentNameEnum.PlanUpdater];
+                  if (!updaterModel) {
+                    port.postMessage({ type: 'plan_update_result', status: 'skipped', reason: 'no_model' });
+                  } else {
+                    const providers = await llmProviderStore.getAllProviders();
+                    const providerCfg = providers[updaterModel.provider];
+                    if (!providerCfg) {
+                      port.postMessage({ type: 'plan_update_result', status: 'skipped', reason: 'provider_missing' });
+                    } else {
+                      const { createChatModel } = await import('./agent/helper');
+                      const chat = createChatModel(providerCfg, updaterModel);
+                      const system = planUpdaterSystemPromptTemplate;
+                      const user = `<original_task>${plan.task}</original_task>\n<new_task>${message.newTask}</new_task>\n<cached_plan_json>${JSON.stringify(plan)}</cached_plan_json>`;
+                      const resp = await chat.invoke([
+                        { role: 'system', content: system },
+                        { role: 'user', content: user },
+                      ]);
+                      let text = '';
+                      if (typeof resp.content === 'string') text = resp.content;
+                      else text = JSON.stringify(resp.content);
+                      interface ParsedUpdatedAction {
+                        type: string;
+                        selector?: string;
+                        text?: string;
+                        url?: string;
+                        keys?: string;
+                        index?: number;
+                        rawParams?: Record<string, unknown>;
+                      }
+                      interface ParsedUpdatedStep {
+                        index?: number;
+                        plannerOutput?: string;
+                        navigatorOutput?: string;
+                        actions?: ParsedUpdatedAction[];
+                      }
+                      interface ParsedPlanOk {
+                        status: 'ok';
+                        updated_task?: string;
+                        plan: { steps: ParsedUpdatedStep[] };
+                        change_summary?: string;
+                      }
+                      interface ParsedPlanReject {
+                        status: 'reject';
+                        reason: string;
+                      }
+                      type ParsedResult = ParsedPlanOk | ParsedPlanReject | Record<string, unknown>;
+                      let parsed: ParsedResult | undefined;
+                      try {
+                        parsed = JSON.parse(text);
+                      } catch {
+                        /* ignore */
+                      }
+                      if (
+                        parsed &&
+                        (parsed as ParsedPlanOk).status === 'ok' &&
+                        (parsed as ParsedPlanOk).plan &&
+                        Array.isArray((parsed as ParsedPlanOk).plan.steps)
+                      ) {
+                        // Build new plan object
+                        plan = {
+                          ...plan,
+                          task: (parsed as ParsedPlanOk).updated_task || message.newTask,
+                          steps: (parsed as ParsedPlanOk).plan.steps.map((s, idx: number) => ({
+                            index: typeof s.index === 'number' ? s.index : idx,
+                            plannerOutput: s.plannerOutput,
+                            navigatorOutput: s.navigatorOutput,
+                            actions: (s.actions || []).map(a => ({
+                              type: a.type,
+                              selector: a.selector,
+                              text: a.text,
+                              url: a.url,
+                              keys: a.keys,
+                              index: a.index,
+                              rawParams: a.rawParams,
+                            })),
+                          })),
+                        };
+                        port.postMessage({
+                          type: 'plan_update_result',
+                          status: 'ok',
+                          durationMs: Date.now() - startUpdate,
+                          changeSummary: (parsed as ParsedPlanOk).change_summary,
+                        });
+                      } else if (parsed && (parsed as ParsedPlanReject).status === 'reject') {
+                        port.postMessage({
+                          type: 'plan_update_result',
+                          status: 'reject',
+                          reason: (parsed as ParsedPlanReject).reason,
+                        });
+                        return; // abort replay
+                      } else {
+                        port.postMessage({
+                          type: 'plan_update_result',
+                          status: 'error',
+                          reason: 'parse_failed',
+                          raw: text,
+                        });
+                      }
+                    }
+                  }
+                } catch (e) {
+                  port.postMessage({
+                    type: 'plan_update_result',
+                    status: 'error',
+                    reason: e instanceof Error ? e.message : 'update_failed',
+                  });
+                }
+              }
               await browserContext.switchTab(message.tabId);
               const { ReplayCacheNavigator } = await import('./agent/plan_cache/replay_navigator');
               const replay = new ReplayCacheNavigator(browserContext, {

@@ -43,12 +43,14 @@ export const ModelSettings = ({ isDarkMode = false }: ModelSettingsProps) => {
     [AgentNameEnum.Planner]: '',
     [AgentNameEnum.Validator]: '',
     [AgentNameEnum.ReplayNavigator]: '',
+    [AgentNameEnum.PlanUpdater]: '',
   });
   const [modelParameters, setModelParameters] = useState<Record<AgentNameEnum, { temperature: number; topP: number }>>({
     [AgentNameEnum.Navigator]: { temperature: 0, topP: 0 },
     [AgentNameEnum.Planner]: { temperature: 0, topP: 0 },
     [AgentNameEnum.Validator]: { temperature: 0, topP: 0 },
     [AgentNameEnum.ReplayNavigator]: { temperature: 0, topP: 0 },
+    [AgentNameEnum.PlanUpdater]: { temperature: 0, topP: 0 },
   });
 
   // State for reasoning effort for O-series models
@@ -57,6 +59,7 @@ export const ModelSettings = ({ isDarkMode = false }: ModelSettingsProps) => {
     [AgentNameEnum.Planner]: undefined,
     [AgentNameEnum.Validator]: undefined,
     [AgentNameEnum.ReplayNavigator]: undefined,
+    [AgentNameEnum.PlanUpdater]: undefined,
   });
   const [newModelInputs, setNewModelInputs] = useState<Record<string, string>>({});
   const [isProviderSelectorOpen, setIsProviderSelectorOpen] = useState(false);
@@ -105,6 +108,7 @@ export const ModelSettings = ({ isDarkMode = false }: ModelSettingsProps) => {
           [AgentNameEnum.Navigator]: '',
           [AgentNameEnum.Validator]: '',
           [AgentNameEnum.ReplayNavigator]: '',
+          [AgentNameEnum.PlanUpdater]: '',
         };
 
         for (const agent of Object.values(AgentNameEnum)) {
@@ -853,6 +857,10 @@ export const ModelSettings = ({ isDarkMode = false }: ModelSettingsProps) => {
         return 'Develops and refines strategies to complete tasks';
       case AgentNameEnum.Validator:
         return 'Checks if tasks are completed successfully';
+      case AgentNameEnum.ReplayNavigator:
+        return 'Executes cached plan with local step-level recovery';
+      case AgentNameEnum.PlanUpdater:
+        return 'Adapts an existing cached plan to a slightly modified task (rejects if change too large)';
       default:
         return '';
     }
@@ -1617,11 +1625,15 @@ export const ModelSettings = ({ isDarkMode = false }: ModelSettingsProps) => {
           Model Selection
         </h2>
         <div className="space-y-4">
-          {[AgentNameEnum.Planner, AgentNameEnum.Navigator, AgentNameEnum.Validator, AgentNameEnum.ReplayNavigator].map(
-            agentName => (
-              <div key={agentName}>{renderModelSelect(agentName)}</div>
-            ),
-          )}
+          {[
+            AgentNameEnum.Planner,
+            AgentNameEnum.Navigator,
+            AgentNameEnum.Validator,
+            AgentNameEnum.ReplayNavigator,
+            AgentNameEnum.PlanUpdater,
+          ].map(agentName => (
+            <div key={agentName}>{renderModelSelect(agentName)}</div>
+          ))}
         </div>
       </div>
 

@@ -39,6 +39,14 @@ const cardBase = (dark: boolean) =>
 const SessionViewer: React.FC<Props> = ({ isDarkMode }) => {
   const [plans, setPlans] = useState<CachedPlan[]>([]);
   const [activePlanId, setActivePlanId] = useState<string | undefined>();
+  const [newTaskDraft, setNewTaskDraft] = useState('');
+  const [planUpdateStatus, setPlanUpdateStatus] = useState<
+    | { status: 'idle' }
+    | { status: 'skipped'; reason: string }
+    | { status: 'ok'; durationMs: number; changeSummary?: string }
+    | { status: 'reject'; reason: string }
+    | { status: 'error'; reason: string }
+  >({ status: 'idle' });
   const [executing, setExecuting] = useState<'idle' | 'running' | 'success' | 'failed' | 'cleared'>('idle');
   const [progress, setProgress] = useState<{ runningStep?: number; failedStep?: number; error?: string }>({});
   const [replanDebug, setReplanDebug] = useState<
@@ -80,14 +88,22 @@ const SessionViewer: React.FC<Props> = ({ isDarkMode }) => {
   const executeCachedPlan = async () => {
     if (!activePlanId) return;
     setExecuting('running');
+    setPlanUpdateStatus({ status: 'idle' });
     try {
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
       const tabId = tabs[0]?.id;
       if (!tabId) throw new Error('No active tab');
       const port = chrome.runtime.connect({ name: 'side-panel-connection' });
-      port.postMessage({ type: 'execute_cached_plan', tabId });
+      port.postMessage({ type: 'execute_cached_plan', tabId, newTask: newTaskDraft.trim() || undefined });
       const replanAttemptPerStep: Record<number, number> = {};
       port.onMessage.addListener(msg => {
+        if (msg.type === 'plan_update_result') {
+          if (msg.status === 'ok')
+            setPlanUpdateStatus({ status: 'ok', durationMs: msg.durationMs, changeSummary: msg.changeSummary });
+          else if (msg.status === 'reject') setPlanUpdateStatus({ status: 'reject', reason: msg.reason });
+          else if (msg.status === 'skipped') setPlanUpdateStatus({ status: 'skipped', reason: msg.reason });
+          else if (msg.status === 'error') setPlanUpdateStatus({ status: 'error', reason: msg.reason });
+        }
         if (msg.type === 'cached_plan_status') {
           if (msg.status === 'running') setExecuting('running');
           else if (msg.status === 'success') {
@@ -342,6 +358,38 @@ const SessionViewer: React.FC<Props> = ({ isDarkMode }) => {
               )}
               <div className={`text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
                 步骤数: {activePlan.steps.length}
+              </div>
+              <div className="space-y-2 pt-2">
+                <label className="block text-xs font-medium opacity-80">
+                  新任务（可选，需与原任务高度相似）
+                  <input
+                    value={newTaskDraft}
+                    onChange={e => setNewTaskDraft(e.target.value)}
+                    placeholder="例如：查看北京后天的天气"
+                    className={`mt-1 w-full rounded border px-2 py-1 text-xs outline-none ${isDarkMode ? 'border-slate-600 bg-slate-800 text-gray-100' : 'border-slate-300 bg-white text-gray-800'}`}
+                  />
+                </label>
+                {planUpdateStatus.status !== 'idle' && (
+                  <div className="rounded border p-2 text-[11px] leading-snug shadow-sm ${isDarkMode ? 'border-slate-600 bg-slate-800' : 'border-slate-200 bg-slate-50'}">
+                    {planUpdateStatus.status === 'skipped' && <div>Plan Updater 跳过: {planUpdateStatus.reason}</div>}
+                    {planUpdateStatus.status === 'ok' && (
+                      <div>
+                        <div className="text-green-500">Plan 已更新 ({planUpdateStatus.durationMs}ms)</div>
+                        {planUpdateStatus.changeSummary && (
+                          <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap text-[10px] text-green-400">
+                            {planUpdateStatus.changeSummary}
+                          </pre>
+                        )}
+                      </div>
+                    )}
+                    {planUpdateStatus.status === 'reject' && (
+                      <div className="text-red-500">Plan 无法适配: {planUpdateStatus.reason}</div>
+                    )}
+                    {planUpdateStatus.status === 'error' && (
+                      <div className="text-red-500">Plan 更新错误: {planUpdateStatus.reason}</div>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="flex flex-wrap gap-2 pt-2">
                 <button
