@@ -49,9 +49,16 @@ const SessionViewer: React.FC<Props> = ({ isDarkMode }) => {
       raw: unknown;
       parsed?: unknown;
       error?: string;
+      loading?: boolean; // waiting for LLM response
+      durationMs?: number; // LLM latency
+      failingAction?: string;
+      triggerError?: string;
     }[]
   >([]);
+  // Track which steps should auto expand (failed or replan active)
+  const [autoExpandSteps, setAutoExpandSteps] = useState<Record<number, boolean>>({});
   const [loading, setLoading] = useState(true);
+  const [stepDurations, setStepDurations] = useState<Record<number, number>>({});
 
   useEffect(() => {
     (async () => {
@@ -93,25 +100,84 @@ const SessionViewer: React.FC<Props> = ({ isDarkMode }) => {
           if (ev.status === 'running') setProgress(p => ({ ...p, runningStep: ev.stepIndex }));
           else if (ev.status === 'success')
             setProgress(p => (p.runningStep === ev.stepIndex ? { ...p, runningStep: undefined } : p));
-          else if (ev.status === 'failed') setProgress({ failedStep: ev.stepIndex, error: ev.error });
+          else if (ev.status === 'failed') {
+            setProgress({ failedStep: ev.stepIndex, error: ev.error });
+            setAutoExpandSteps(s => ({ ...s, [ev.stepIndex]: true }));
+          }
         } else if (msg.type === 'agent_event' && msg.event?.data?.details) {
           const details = msg.event.data.details;
           try {
             const parsed = JSON.parse(details);
-            if (parsed && typeof parsed.kind === 'string' && parsed.kind.startsWith('replay_local_replan')) {
-              const stepIdx = msg.event.data.step ?? 0;
-              replanAttemptPerStep[stepIdx] = (replanAttemptPerStep[stepIdx] || 0) + 1;
-              setReplanDebug(list => [
-                ...list,
-                {
-                  step: stepIdx,
-                  attempt: replanAttemptPerStep[stepIdx],
-                  request: parsed.request || { system: '', user: '' },
-                  raw: parsed.raw ?? parsed.reason ?? parsed.text ?? parsed,
-                  parsed: parsed.parsed,
-                  error: parsed.error,
-                },
-              ]);
+            if (parsed && typeof parsed.kind === 'string') {
+              if (parsed.kind === 'replay_step_timing' && typeof parsed.step === 'number') {
+                if (typeof parsed.duration_ms === 'number') {
+                  setStepDurations(d => ({ ...d, [parsed.step]: parsed.duration_ms }));
+                }
+              }
+              if (parsed.kind.startsWith('replay_local_replan')) {
+                const stepIdx = msg.event.data.step ?? 0;
+                if (parsed.kind === 'replay_local_replan_request') {
+                  replanAttemptPerStep[stepIdx] = (replanAttemptPerStep[stepIdx] || 0) + 1;
+                  setReplanDebug(list => [
+                    ...list,
+                    {
+                      step: stepIdx,
+                      attempt: replanAttemptPerStep[stepIdx],
+                      request: parsed.request || { system: '', user: '' },
+                      raw: undefined,
+                      parsed: undefined,
+                      error: undefined,
+                      loading: true,
+                      durationMs: undefined,
+                      failingAction: parsed.failing_action,
+                      triggerError: parsed.trigger_error,
+                    },
+                  ]);
+                  setAutoExpandSteps(s => ({ ...s, [stepIdx]: true }));
+                } else if (
+                  parsed.kind === 'replay_local_replan' ||
+                  parsed.kind === 'replay_local_replan_parse_fail' ||
+                  parsed.kind === 'replay_local_replan_error' ||
+                  parsed.kind === 'replay_local_replan_skipped'
+                ) {
+                  // Update the latest attempt for this step (loading -> complete)
+                  setReplanDebug(list => {
+                    const idx = [...list].reverse().findIndex(r => r.step === stepIdx && r.loading);
+                    const realIndex = idx === -1 ? -1 : list.length - 1 - idx;
+                    const rawVal = parsed.raw ?? parsed.reason ?? parsed.text ?? parsed;
+                    if (realIndex >= 0) {
+                      const updated = [...list];
+                      const target = { ...updated[realIndex] };
+                      target.raw = rawVal;
+                      target.parsed = parsed.parsed;
+                      target.error = parsed.error;
+                      target.loading = false;
+                      if (typeof parsed.duration_ms === 'number') target.durationMs = parsed.duration_ms;
+                      if (parsed.failing_action) target.failingAction = parsed.failing_action;
+                      if (parsed.trigger_error) target.triggerError = parsed.trigger_error;
+                      updated[realIndex] = target;
+                      return updated;
+                    }
+                    // fallback append
+                    replanAttemptPerStep[stepIdx] = (replanAttemptPerStep[stepIdx] || 0) + 1;
+                    return [
+                      ...list,
+                      {
+                        step: stepIdx,
+                        attempt: replanAttemptPerStep[stepIdx],
+                        request: parsed.request || { system: '', user: '' },
+                        raw: rawVal,
+                        parsed: parsed.parsed,
+                        error: parsed.error,
+                        loading: false,
+                        durationMs: typeof parsed.duration_ms === 'number' ? parsed.duration_ms : undefined,
+                        failingAction: parsed.failing_action,
+                        triggerError: parsed.trigger_error,
+                      },
+                    ];
+                  });
+                }
+              }
             }
           } catch {
             // ignore non-JSON
@@ -338,9 +404,19 @@ const SessionViewer: React.FC<Props> = ({ isDarkMode }) => {
       raw: unknown;
       parsed?: unknown;
       error?: string;
+      loading?: boolean;
+      durationMs?: number;
+      failingAction?: string;
+      triggerError?: string;
     }[];
   }> = ({ step, isDarkMode, progress, replanItems }) => {
-    const [expanded, setExpanded] = useState(false);
+    const [expanded, setExpanded] = useState(() => !!autoExpandSteps[step.index]);
+    // auto expand when flagged later
+    useEffect(() => {
+      if (autoExpandSteps[step.index]) setExpanded(true);
+      // intentionally only depend on step.index to avoid lint false positive; state update triggered externally
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [step.index]);
     const [showReplan, setShowReplan] = useState(true);
     const copy = (text: string) => navigator.clipboard.writeText(text).catch(() => undefined);
     const plannerPretty = prettyMaybe(step.plannerOutput);
@@ -369,6 +445,11 @@ const SessionViewer: React.FC<Props> = ({ isDarkMode }) => {
             {isFailed && (
               <span className="inline-flex items-center rounded bg-red-500/20 px-2 py-0.5 text-[10px] text-red-400">
                 执行失败
+              </span>
+            )}
+            {!isRunning && !isFailed && typeof (stepDurations as Record<number, number>)[step.index] === 'number' && (
+              <span className="inline-flex items-center rounded bg-slate-500/20 px-2 py-0.5 text-[10px] text-slate-400">
+                {(stepDurations as Record<number, number>)[step.index]}ms
               </span>
             )}
             {step.actions.length > 0 && (
@@ -434,15 +515,80 @@ const SessionViewer: React.FC<Props> = ({ isDarkMode }) => {
                 {replanItems.map(item => {
                   const sysPretty = item.request.system.trim();
                   const userPretty = item.request.user.trim();
-                  const rawStr = typeof item.raw === 'string' ? item.raw : JSON.stringify(item.raw, null, 2);
+                  let rawStr = '';
+                  if (item.loading) {
+                    rawStr = '⏳ 等待 LLM 响应...';
+                  } else if (item.raw) {
+                    // Extract content only; raw may be an object or string
+                    let content: unknown = item.raw;
+                    if (typeof item.raw === 'string') {
+                      try {
+                        const parsedVal: unknown = JSON.parse(item.raw);
+                        if (
+                          parsedVal &&
+                          typeof parsedVal === 'object' &&
+                          'content' in (parsedVal as Record<string, unknown>)
+                        ) {
+                          content = (parsedVal as Record<string, unknown>).content;
+                        } else {
+                          content = parsedVal;
+                        }
+                      } catch {
+                        content = item.raw;
+                      }
+                    } else if (typeof item.raw === 'object' && item.raw) {
+                      if ('content' in (item.raw as Record<string, unknown>)) {
+                        content = (item.raw as Record<string, unknown>).content;
+                      }
+                    }
+                    if (typeof content === 'string') {
+                      // Try JSON pretty if it's JSON
+                      let trimmed = content;
+                      const maybeJson = content.trim();
+                      if (
+                        (maybeJson.startsWith('{') && maybeJson.endsWith('}')) ||
+                        (maybeJson.startsWith('[') && maybeJson.endsWith(']'))
+                      ) {
+                        try {
+                          const obj = JSON.parse(maybeJson);
+                          trimmed = JSON.stringify(obj, null, 2);
+                        } catch {
+                          /* ignore */
+                        }
+                      }
+                      rawStr = trimmed.length > 4000 ? trimmed.slice(0, 4000) + '\n... (trimmed)' : trimmed;
+                    } else if (typeof content === 'object') {
+                      try {
+                        rawStr = JSON.stringify(content, null, 2);
+                      } catch {
+                        rawStr = String(content);
+                      }
+                    } else {
+                      rawStr = String(content ?? '');
+                    }
+                  }
+                  // Shorten extremely long noise
+                  if (rawStr.length > 4000) rawStr = rawStr.slice(0, 4000) + '\n... (trimmed)';
                   return (
                     <div
                       key={item.attempt}
                       className={`rounded border p-2 ${isDarkMode ? 'border-amber-800/50 bg-amber-900/20' : 'border-amber-200 bg-amber-50'}`}>
                       <div className="mb-1 flex justify-between text-[10px] font-medium text-amber-600 dark:text-amber-300">
                         <span>Attempt {item.attempt}</span>
-                        {item.error && <span className="text-red-500">{item.error}</span>}
+                        <span className="flex items-center gap-2">
+                          {item.failingAction && <span className="text-amber-500">{item.failingAction}</span>}
+                          {!item.loading && typeof item.durationMs === 'number' && (
+                            <span className="text-amber-400">{item.durationMs}ms</span>
+                          )}
+                          {item.loading && <span className="animate-pulse text-amber-400">等待响应...</span>}
+                          {!item.loading && item.error && <span className="text-red-500">{item.error}</span>}
+                        </span>
                       </div>
+                      {item.triggerError && (
+                        <div className="mb-1 rounded bg-red-500/10 p-1 text-[10px] text-red-400">
+                          触发错误: {item.triggerError}
+                        </div>
+                      )}
                       <details className="mb-1" open>
                         <summary className="cursor-pointer text-[11px] font-semibold">System Prompt</summary>
                         <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-black/10 p-1 text-[10px] leading-snug dark:bg-black/30">
@@ -456,7 +602,10 @@ const SessionViewer: React.FC<Props> = ({ isDarkMode }) => {
                         </pre>
                       </details>
                       <details open>
-                        <summary className="cursor-pointer text-[11px] font-semibold">LLM Raw Output</summary>
+                        <summary className="cursor-pointer text-[11px] font-semibold">
+                          LLM Content 输出
+                          {!item.loading && typeof item.durationMs === 'number' ? ` (${item.durationMs}ms)` : ''}
+                        </summary>
                         <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-black/10 p-1 text-[10px] leading-snug dark:bg-black/30">
                           {rawStr}
                         </pre>

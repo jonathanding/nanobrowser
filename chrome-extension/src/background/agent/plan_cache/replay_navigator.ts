@@ -202,6 +202,7 @@ export class ReplayCacheNavigator {
   private async executeStep(
     step: CachedPlanStep,
   ): Promise<{ ok: boolean; error?: string; failingActionType?: string }> {
+    const stepStart = Date.now();
     this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.STEP_START, `Replay step ${step.index}`);
     for (const action of step.actions) {
       const result = await this.executeAction(action);
@@ -210,7 +211,12 @@ export class ReplayCacheNavigator {
         return { ok: false, error: result.error, failingActionType: action.type };
       }
     }
-    this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.STEP_OK, `Replay step ${step.index} done`);
+    const dur = Date.now() - stepStart;
+    this.context.emitEvent(
+      Actors.NAVIGATOR,
+      ExecutionState.STEP_OK,
+      JSON.stringify({ kind: 'replay_step_timing', step: step.index, duration_ms: dur }),
+    );
     return { ok: true };
   }
 
@@ -391,12 +397,33 @@ export class ReplayCacheNavigator {
         { role: 'system', content: prompt },
         { role: 'user', content: userContent },
       ];
+      // Emit pre-send event so UI can display prompt immediately & show loading state
+      this.context.emitEvent(
+        Actors.NAVIGATOR,
+        ExecutionState.STEP_START,
+        JSON.stringify({
+          kind: 'replay_local_replan_request',
+          request: { system: prompt, user: userContent },
+          ts: Date.now(),
+          failing_action: failingAction,
+          trigger_error: error,
+        }),
+      );
+      const invokeStart = Date.now();
       response = await replayLLM.invoke(messages);
+      const invokeDur = Date.now() - invokeStart;
       // Emit debug info event for UI (prompt + raw model output)
       this.context.emitEvent(
         Actors.NAVIGATOR,
         ExecutionState.STEP_START,
-        JSON.stringify({ kind: 'replay_local_replan', request: { system: prompt, user: userContent }, raw: response }),
+        JSON.stringify({
+          kind: 'replay_local_replan',
+          request: { system: prompt, user: userContent },
+          raw: response,
+          duration_ms: invokeDur,
+          failing_action: failingAction,
+          trigger_error: error,
+        }),
       );
       const text = typeof response?.content === 'string' ? response.content : JSON.stringify(response?.content);
       let parsed: ReplanJSON | undefined;
@@ -411,7 +438,13 @@ export class ReplayCacheNavigator {
         this.context.emitEvent(
           Actors.NAVIGATOR,
           ExecutionState.STEP_START,
-          JSON.stringify({ kind: 'replay_local_replan_parse_fail', text }),
+          JSON.stringify({
+            kind: 'replay_local_replan_parse_fail',
+            text,
+            duration_ms: invokeDur,
+            failing_action: failingAction,
+            trigger_error: error,
+          }),
         );
         if (this.options.verbose) {
           // eslint-disable-next-line no-console
@@ -442,10 +475,17 @@ export class ReplayCacheNavigator {
       return true;
     } catch (e) {
       logger.error('Local replan invoke failed', e);
+      const duration = response ? undefined : undefined; // if invoke failed before response we cannot measure reliably here
       this.context.emitEvent(
         Actors.NAVIGATOR,
         ExecutionState.STEP_START,
-        JSON.stringify({ kind: 'replay_local_replan_error', error: e instanceof Error ? e.message : String(e) }),
+        JSON.stringify({
+          kind: 'replay_local_replan_error',
+          error: e instanceof Error ? e.message : String(e),
+          failing_action: failingAction,
+          trigger_error: error,
+          duration_ms: duration,
+        }),
       );
       if (this.options.verbose) {
         // eslint-disable-next-line no-console
