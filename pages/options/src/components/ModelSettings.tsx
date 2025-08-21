@@ -20,7 +20,6 @@ import {
   getDefaultProviderConfig,
   getDefaultAgentModelParams,
   type ProviderConfig,
-  type SpeechToTextModelConfig,
 } from '@extension/storage';
 
 // Helper function to check if a model is an O-series model
@@ -43,11 +42,13 @@ export const ModelSettings = ({ isDarkMode = false }: ModelSettingsProps) => {
     [AgentNameEnum.Navigator]: '',
     [AgentNameEnum.Planner]: '',
     [AgentNameEnum.Validator]: '',
+    [AgentNameEnum.ReplayNavigator]: '',
   });
   const [modelParameters, setModelParameters] = useState<Record<AgentNameEnum, { temperature: number; topP: number }>>({
     [AgentNameEnum.Navigator]: { temperature: 0, topP: 0 },
     [AgentNameEnum.Planner]: { temperature: 0, topP: 0 },
     [AgentNameEnum.Validator]: { temperature: 0, topP: 0 },
+    [AgentNameEnum.ReplayNavigator]: { temperature: 0, topP: 0 },
   });
 
   // State for reasoning effort for O-series models
@@ -55,6 +56,7 @@ export const ModelSettings = ({ isDarkMode = false }: ModelSettingsProps) => {
     [AgentNameEnum.Navigator]: undefined,
     [AgentNameEnum.Planner]: undefined,
     [AgentNameEnum.Validator]: undefined,
+    [AgentNameEnum.ReplayNavigator]: undefined,
   });
   const [newModelInputs, setNewModelInputs] = useState<Record<string, string>>({});
   const [isProviderSelectorOpen, setIsProviderSelectorOpen] = useState(false);
@@ -102,6 +104,7 @@ export const ModelSettings = ({ isDarkMode = false }: ModelSettingsProps) => {
           [AgentNameEnum.Planner]: '',
           [AgentNameEnum.Navigator]: '',
           [AgentNameEnum.Validator]: '',
+          [AgentNameEnum.ReplayNavigator]: '',
         };
 
         for (const agent of Object.values(AgentNameEnum)) {
@@ -1545,7 +1548,7 @@ export const ModelSettings = ({ isDarkMode = false }: ModelSettingsProps) => {
           )}
 
           {/* Add Provider button and dropdown */}
-          <div className="provider-selector-container relative pt-4">
+          <div data-provider-selector-container className="relative pt-4">
             <Button
               variant="secondary"
               onClick={() => setIsProviderSelectorOpen(prev => !prev)}
@@ -1614,9 +1617,11 @@ export const ModelSettings = ({ isDarkMode = false }: ModelSettingsProps) => {
           Model Selection
         </h2>
         <div className="space-y-4">
-          {[AgentNameEnum.Planner, AgentNameEnum.Navigator, AgentNameEnum.Validator].map(agentName => (
-            <div key={agentName}>{renderModelSelect(agentName)}</div>
-          ))}
+          {[AgentNameEnum.Planner, AgentNameEnum.Navigator, AgentNameEnum.Validator, AgentNameEnum.ReplayNavigator].map(
+            agentName => (
+              <div key={agentName}>{renderModelSelect(agentName)}</div>
+            ),
+          )}
         </div>
       </div>
 
@@ -1646,7 +1651,7 @@ export const ModelSettings = ({ isDarkMode = false }: ModelSettingsProps) => {
               <option value="">Choose Model</option>
               {/* Filter available models to show only Gemini models */}
               {availableModels
-                .filter(({ provider, model }) => {
+                .filter(({ provider }) => {
                   const providerConfig = providers[provider];
                   return providerConfig?.type === ProviderTypeEnum.Gemini;
                 })

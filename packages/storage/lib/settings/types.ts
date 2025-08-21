@@ -3,6 +3,7 @@ export enum AgentNameEnum {
   Planner = 'planner',
   Navigator = 'navigator',
   Validator = 'validator',
+  ReplayNavigator = 'replay_navigator',
 }
 
 // Provider type, types before CustomOpenAI are built-in providers, CustomOpenAI is a custom provider
@@ -66,6 +67,10 @@ export const llmProviderParameters = {
       temperature: 0.3,
       topP: 0.85,
     },
+    [AgentNameEnum.ReplayNavigator]: {
+      temperature: 0.2,
+      topP: 0.7,
+    },
     [AgentNameEnum.Validator]: {
       temperature: 0.1,
       topP: 0.8,
@@ -78,6 +83,10 @@ export const llmProviderParameters = {
     },
     [AgentNameEnum.Navigator]: {
       temperature: 0.2,
+      topP: 0.5,
+    },
+    [AgentNameEnum.ReplayNavigator]: {
+      temperature: 0.15,
       topP: 0.5,
     },
     [AgentNameEnum.Validator]: {
@@ -94,6 +103,10 @@ export const llmProviderParameters = {
       temperature: 0.3,
       topP: 0.85,
     },
+    [AgentNameEnum.ReplayNavigator]: {
+      temperature: 0.2,
+      topP: 0.75,
+    },
     [AgentNameEnum.Validator]: {
       temperature: 0.1,
       topP: 0.8,
@@ -107,6 +120,10 @@ export const llmProviderParameters = {
     [AgentNameEnum.Navigator]: {
       temperature: 0.3,
       topP: 0.85,
+    },
+    [AgentNameEnum.ReplayNavigator]: {
+      temperature: 0.2,
+      topP: 0.75,
     },
     [AgentNameEnum.Validator]: {
       temperature: 0.1,
@@ -122,6 +139,10 @@ export const llmProviderParameters = {
       temperature: 0.1,
       topP: 0.85,
     },
+    [AgentNameEnum.ReplayNavigator]: {
+      temperature: 0.1,
+      topP: 0.75,
+    },
     [AgentNameEnum.Validator]: {
       temperature: 0.1,
       topP: 0.8,
@@ -135,6 +156,10 @@ export const llmProviderParameters = {
     [AgentNameEnum.Navigator]: {
       temperature: 0.3,
       topP: 0.85,
+    },
+    [AgentNameEnum.ReplayNavigator]: {
+      temperature: 0.2,
+      topP: 0.75,
     },
     [AgentNameEnum.Validator]: {
       temperature: 0.1,
@@ -150,6 +175,10 @@ export const llmProviderParameters = {
       temperature: 0.3,
       topP: 0.85,
     },
+    [AgentNameEnum.ReplayNavigator]: {
+      temperature: 0.2,
+      topP: 0.75,
+    },
     [AgentNameEnum.Validator]: {
       temperature: 0.1,
       topP: 0.8,
@@ -163,6 +192,10 @@ export const llmProviderParameters = {
     [AgentNameEnum.Navigator]: {
       temperature: 0.3,
       topP: 0.85,
+    },
+    [AgentNameEnum.ReplayNavigator]: {
+      temperature: 0.2,
+      topP: 0.75,
     },
     [AgentNameEnum.Validator]: {
       temperature: 0.1,
@@ -178,6 +211,10 @@ export const llmProviderParameters = {
       temperature: 0.3,
       topP: 0.85,
     },
+    [AgentNameEnum.ReplayNavigator]: {
+      temperature: 0.2,
+      topP: 0.75,
+    },
     [AgentNameEnum.Validator]: {
       temperature: 0.1,
       topP: 0.8,
@@ -191,6 +228,10 @@ export const llmProviderParameters = {
     [AgentNameEnum.Navigator]: {
       temperature: 0.3,
       topP: 0.85,
+    },
+    [AgentNameEnum.ReplayNavigator]: {
+      temperature: 0.2,
+      topP: 0.75,
     },
     [AgentNameEnum.Validator]: {
       temperature: 0.1,

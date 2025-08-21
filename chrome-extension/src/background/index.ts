@@ -227,7 +227,19 @@ chrome.runtime.onConnect.addListener(port => {
               if (!message.tabId) return port.postMessage({ type: 'error', error: 'No tab ID provided' });
               await browserContext.switchTab(message.tabId);
               const { ReplayCacheNavigator } = await import('./agent/plan_cache/replay_navigator');
-              const replay = new ReplayCacheNavigator(browserContext, { delayMs: 400 });
+              const replay = new ReplayCacheNavigator(browserContext, {
+                delayMs: 400,
+                enableLocalReplan: true,
+                verbose: true,
+              });
+              // Forward replay internal events (including replan debug) to UI
+              replay.onEvent(evt => {
+                try {
+                  port.postMessage({ type: 'agent_event', event: evt });
+                } catch (fwdErr) {
+                  logger.error('Failed forwarding replay event', fwdErr);
+                }
+              });
               port.postMessage({ type: 'cached_plan_status', status: 'running' });
               const ok = await replay.replay(plan, ev => {
                 port.postMessage({ type: 'cached_plan_progress', event: ev });

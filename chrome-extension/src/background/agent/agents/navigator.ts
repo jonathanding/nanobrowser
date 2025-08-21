@@ -56,6 +56,10 @@ export class NavigatorActionRegistry {
     return this.actions[name];
   }
 
+  listActions(): Action[] {
+    return Object.values(this.actions);
+  }
+
   setupModelOutputSchema(): z.ZodType {
     const actionSchema = buildDynamicActionSchema(Object.values(this.actions));
     return z.object({

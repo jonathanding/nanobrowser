@@ -41,6 +41,16 @@ const SessionViewer: React.FC<Props> = ({ isDarkMode }) => {
   const [activePlanId, setActivePlanId] = useState<string | undefined>();
   const [executing, setExecuting] = useState<'idle' | 'running' | 'success' | 'failed' | 'cleared'>('idle');
   const [progress, setProgress] = useState<{ runningStep?: number; failedStep?: number; error?: string }>({});
+  const [replanDebug, setReplanDebug] = useState<
+    {
+      step: number;
+      attempt: number;
+      request: { system: string; user: string };
+      raw: unknown;
+      parsed?: unknown;
+      error?: string;
+    }[]
+  >([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -69,6 +79,7 @@ const SessionViewer: React.FC<Props> = ({ isDarkMode }) => {
       if (!tabId) throw new Error('No active tab');
       const port = chrome.runtime.connect({ name: 'side-panel-connection' });
       port.postMessage({ type: 'execute_cached_plan', tabId });
+      const replanAttemptPerStep: Record<number, number> = {};
       port.onMessage.addListener(msg => {
         if (msg.type === 'cached_plan_status') {
           if (msg.status === 'running') setExecuting('running');
@@ -83,6 +94,28 @@ const SessionViewer: React.FC<Props> = ({ isDarkMode }) => {
           else if (ev.status === 'success')
             setProgress(p => (p.runningStep === ev.stepIndex ? { ...p, runningStep: undefined } : p));
           else if (ev.status === 'failed') setProgress({ failedStep: ev.stepIndex, error: ev.error });
+        } else if (msg.type === 'agent_event' && msg.event?.data?.details) {
+          const details = msg.event.data.details;
+          try {
+            const parsed = JSON.parse(details);
+            if (parsed && typeof parsed.kind === 'string' && parsed.kind.startsWith('replay_local_replan')) {
+              const stepIdx = msg.event.data.step ?? 0;
+              replanAttemptPerStep[stepIdx] = (replanAttemptPerStep[stepIdx] || 0) + 1;
+              setReplanDebug(list => [
+                ...list,
+                {
+                  step: stepIdx,
+                  attempt: replanAttemptPerStep[stepIdx],
+                  request: parsed.request || { system: '', user: '' },
+                  raw: parsed.raw ?? parsed.reason ?? parsed.text ?? parsed,
+                  parsed: parsed.parsed,
+                  error: parsed.error,
+                },
+              ]);
+            }
+          } catch {
+            // ignore non-JSON
+          }
         }
       });
       // Auto reset status after a while
@@ -269,7 +302,13 @@ const SessionViewer: React.FC<Props> = ({ isDarkMode }) => {
             </div>
             <div className="space-y-3">
               {activePlan.steps.map(step => (
-                <CacheStep key={step.index} step={step} isDarkMode={isDarkMode} progress={progress} />
+                <CacheStep
+                  key={step.index}
+                  step={step}
+                  isDarkMode={isDarkMode}
+                  progress={progress}
+                  replanItems={replanDebug.filter(r => r.step === step.index)}
+                />
               ))}
             </div>
           </div>
@@ -292,8 +331,17 @@ const SessionViewer: React.FC<Props> = ({ isDarkMode }) => {
     step: CachedPlanStep;
     isDarkMode: boolean;
     progress?: { runningStep?: number; failedStep?: number; error?: string };
-  }> = ({ step, isDarkMode, progress }) => {
+    replanItems?: {
+      step: number;
+      attempt: number;
+      request: { system: string; user: string };
+      raw: unknown;
+      parsed?: unknown;
+      error?: string;
+    }[];
+  }> = ({ step, isDarkMode, progress, replanItems }) => {
     const [expanded, setExpanded] = useState(false);
+    const [showReplan, setShowReplan] = useState(true);
     const copy = (text: string) => navigator.clipboard.writeText(text).catch(() => undefined);
     const plannerPretty = prettyMaybe(step.plannerOutput);
     const navigatorPretty = prettyMaybe(step.navigatorOutput);
@@ -369,6 +417,55 @@ const SessionViewer: React.FC<Props> = ({ isDarkMode }) => {
               className={`max-h-60 overflow-auto rounded-md border p-2 text-[11px] leading-snug ${isDarkMode ? 'border-slate-600 bg-slate-900/60 text-blue-300' : 'border-slate-200 bg-slate-50 text-blue-700'} whitespace-pre`}>
               {navigatorPretty}
             </pre>
+          </div>
+        )}
+        {expanded && replanItems && replanItems.length > 0 && (
+          <div className="mb-2">
+            <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-wide text-amber-500">
+              <span>Replan Attempts ({replanItems.length})</span>
+              <button
+                onClick={() => setShowReplan(s => !s)}
+                className="rounded bg-amber-600/20 px-1 py-0.5 text-[10px] text-amber-400 hover:bg-amber-600/30">
+                {showReplan ? '隐藏' : '显示'}
+              </button>
+            </div>
+            {showReplan && (
+              <div className="space-y-2">
+                {replanItems.map(item => {
+                  const sysPretty = item.request.system.trim();
+                  const userPretty = item.request.user.trim();
+                  const rawStr = typeof item.raw === 'string' ? item.raw : JSON.stringify(item.raw, null, 2);
+                  return (
+                    <div
+                      key={item.attempt}
+                      className={`rounded border p-2 ${isDarkMode ? 'border-amber-800/50 bg-amber-900/20' : 'border-amber-200 bg-amber-50'}`}>
+                      <div className="mb-1 flex justify-between text-[10px] font-medium text-amber-600 dark:text-amber-300">
+                        <span>Attempt {item.attempt}</span>
+                        {item.error && <span className="text-red-500">{item.error}</span>}
+                      </div>
+                      <details className="mb-1" open>
+                        <summary className="cursor-pointer text-[11px] font-semibold">System Prompt</summary>
+                        <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-black/10 p-1 text-[10px] leading-snug dark:bg-black/30">
+                          {sysPretty}
+                        </pre>
+                      </details>
+                      <details className="mb-1" open>
+                        <summary className="cursor-pointer text-[11px] font-semibold">User Message</summary>
+                        <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-black/10 p-1 text-[10px] leading-snug dark:bg-black/30">
+                          {userPretty}
+                        </pre>
+                      </details>
+                      <details open>
+                        <summary className="cursor-pointer text-[11px] font-semibold">LLM Raw Output</summary>
+                        <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-black/10 p-1 text-[10px] leading-snug dark:bg-black/30">
+                          {rawStr}
+                        </pre>
+                      </details>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
         <ol className="mt-1 space-y-1">
