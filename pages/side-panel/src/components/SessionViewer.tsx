@@ -47,6 +47,129 @@ const SessionViewer: React.FC<Props> = ({ isDarkMode }) => {
     | { status: 'reject'; reason: string }
     | { status: 'error'; reason: string }
   >({ status: 'idle' });
+  const [planUpdateDebug, setPlanUpdateDebug] = useState<
+    { kind: string; system?: string; user?: string; raw?: string; parsed?: unknown; latencyMs?: number }[]
+  >([]);
+  const [planDiff, setPlanDiff] = useState<null | {
+    steps: Array<{
+      index: number;
+      status: 'unchanged' | 'modified' | 'added' | 'removed';
+      prev?: CachedPlanStep;
+      next?: CachedPlanStep;
+      actionChanges?: Array<{
+        idx: number;
+        status: 'unchanged' | 'modified' | 'added' | 'removed';
+        prevAction?: CachedAction;
+        nextAction?: CachedAction;
+        changedFields?: string[]; // e.g. ['type','url']
+      }>;
+    }>;
+    summary: {
+      addedSteps: number;
+      removedSteps: number;
+      modifiedSteps: number;
+      unchangedSteps: number;
+      addedActions: number;
+      removedActions: number;
+      modifiedActions: number;
+    };
+  }>(null);
+
+  // Compute detailed diff helper
+  const computePlanDiff = (prev: CachedPlan, next: CachedPlan) => {
+    const maxSteps = Math.max(prev.steps.length, next.steps.length);
+    const stepsDiff: Array<{
+      index: number;
+      status: 'unchanged' | 'modified' | 'added' | 'removed';
+      prev?: CachedPlanStep;
+      next?: CachedPlanStep;
+      actionChanges?: Array<{
+        idx: number;
+        status: 'unchanged' | 'modified' | 'added' | 'removed';
+        prevAction?: CachedAction;
+        nextAction?: CachedAction;
+        changedFields?: string[];
+      }>;
+    }> = [];
+    let addedSteps = 0;
+    let removedSteps = 0;
+    let modifiedSteps = 0;
+    let unchangedSteps = 0;
+    let addedActions = 0;
+    let removedActions = 0;
+    let modifiedActions = 0;
+    for (let i = 0; i < maxSteps; i++) {
+      const prevStep = prev.steps[i];
+      const nextStep = next.steps[i];
+      if (prevStep && !nextStep) {
+        removedSteps++;
+        removedActions += prevStep.actions.length;
+        stepsDiff.push({ index: prevStep.index, status: 'removed', prev: prevStep });
+      } else if (!prevStep && nextStep) {
+        addedSteps++;
+        addedActions += nextStep.actions.length;
+        stepsDiff.push({ index: nextStep.index, status: 'added', next: nextStep });
+      } else if (prevStep && nextStep) {
+        const actionChanges: Array<{
+          idx: number;
+          status: 'unchanged' | 'modified' | 'added' | 'removed';
+          prevAction?: CachedAction;
+          nextAction?: CachedAction;
+          changedFields?: string[];
+        }> = [];
+        const maxActions = Math.max(prevStep.actions.length, nextStep.actions.length);
+        let stepModified = false;
+        for (let a = 0; a < maxActions; a++) {
+          const pa = prevStep.actions[a];
+          const na = nextStep.actions[a];
+          if (pa && !na) {
+            removedActions++;
+            stepModified = true;
+            actionChanges.push({ idx: a, status: 'removed', prevAction: pa });
+          } else if (!pa && na) {
+            addedActions++;
+            stepModified = true;
+            actionChanges.push({ idx: a, status: 'added', nextAction: na });
+          } else if (pa && na) {
+            const changedFields: string[] = [];
+            (['type', 'url', 'text', 'selector', 'keys'] as const).forEach(f => {
+              if ((pa as any)[f] !== (na as any)[f]) changedFields.push(f);
+            });
+            if (changedFields.length > 0) {
+              modifiedActions++;
+              stepModified = true;
+              actionChanges.push({ idx: a, status: 'modified', prevAction: pa, nextAction: na, changedFields });
+            } else {
+              actionChanges.push({ idx: a, status: 'unchanged', prevAction: pa, nextAction: na });
+            }
+          }
+        }
+        if (
+          stepModified ||
+          prevStep.plannerOutput !== nextStep.plannerOutput ||
+          prevStep.navigatorOutput !== nextStep.navigatorOutput
+        ) {
+          modifiedSteps++;
+          stepsDiff.push({ index: nextStep.index, status: 'modified', prev: prevStep, next: nextStep, actionChanges });
+        } else {
+          unchangedSteps++;
+          stepsDiff.push({ index: nextStep.index, status: 'unchanged', prev: prevStep, next: nextStep, actionChanges });
+        }
+      }
+    }
+    return {
+      steps: stepsDiff,
+      summary: {
+        addedSteps,
+        removedSteps,
+        modifiedSteps,
+        unchangedSteps,
+        addedActions,
+        removedActions,
+        modifiedActions,
+      },
+    };
+  };
   const [executing, setExecuting] = useState<'idle' | 'running' | 'success' | 'failed' | 'cleared'>('idle');
   const [progress, setProgress] = useState<{ runningStep?: number; failedStep?: number; error?: string }>({});
   const [replanDebug, setReplanDebug] = useState<
@@ -103,6 +226,29 @@ const SessionViewer: React.FC<Props> = ({ isDarkMode }) => {
           else if (msg.status === 'reject') setPlanUpdateStatus({ status: 'reject', reason: msg.reason });
           else if (msg.status === 'skipped') setPlanUpdateStatus({ status: 'skipped', reason: msg.reason });
           else if (msg.status === 'error') setPlanUpdateStatus({ status: 'error', reason: msg.reason });
+          // Build diff if we have original & updated
+          if (msg.status === 'ok' && msg.originalPlan && msg.updatedPlan) {
+            try {
+              setPlanDiff(computePlanDiff(msg.originalPlan, msg.updatedPlan));
+            } catch (e) {
+              console.error('diff failed', e);
+            }
+          } else if (msg.status !== 'ok') {
+            setPlanDiff(null);
+          }
+        }
+        if (msg.type === 'plan_update_debug') {
+          setPlanUpdateDebug(list => [
+            ...list,
+            {
+              kind: msg.kind,
+              system: msg.system,
+              user: msg.user,
+              raw: msg.raw,
+              parsed: msg.parsed,
+              latencyMs: msg.latencyMs,
+            },
+          ]);
         }
         if (msg.type === 'cached_plan_status') {
           if (msg.status === 'running') setExecuting('running');
@@ -380,6 +526,221 @@ const SessionViewer: React.FC<Props> = ({ isDarkMode }) => {
                             {planUpdateStatus.changeSummary}
                           </pre>
                         )}
+                        {planDiff && (
+                          <details className="mt-2" open>
+                            <summary className="cursor-pointer text-[11px] font-semibold text-green-400">
+                              步骤差异 (Diff) - 概览
+                            </summary>
+                            <div className="mt-2 space-y-3">
+                              <div
+                                className={`flex flex-wrap gap-2 text-[10px] ${isDarkMode ? 'text-slate-300' : 'text-slate-600'}`}>
+                                <span className="rounded bg-emerald-600/20 px-2 py-0.5 text-emerald-400">
+                                  新增步骤 {planDiff.summary.addedSteps}
+                                </span>
+                                <span className="rounded bg-red-600/20 px-2 py-0.5 text-red-400">
+                                  删除步骤 {planDiff.summary.removedSteps}
+                                </span>
+                                <span className="rounded bg-amber-600/20 px-2 py-0.5 text-amber-400">
+                                  修改步骤 {planDiff.summary.modifiedSteps}
+                                </span>
+                                <span className="rounded bg-slate-600/20 px-2 py-0.5 text-slate-400">
+                                  未变步骤 {planDiff.summary.unchangedSteps}
+                                </span>
+                                <span className="rounded bg-emerald-600/10 px-2 py-0.5 text-emerald-300">
+                                  新增动作 {planDiff.summary.addedActions}
+                                </span>
+                                <span className="rounded bg-red-600/10 px-2 py-0.5 text-red-300">
+                                  删除动作 {planDiff.summary.removedActions}
+                                </span>
+                                <span className="rounded bg-amber-600/10 px-2 py-0.5 text-amber-300">
+                                  修改动作 {planDiff.summary.modifiedActions}
+                                </span>
+                              </div>
+                              <div className="max-h-96 overflow-auto pr-1 space-y-2">
+                                {planDiff.steps.map(s => (
+                                  <details
+                                    key={s.index + '-' + s.status}
+                                    open={s.status !== 'unchanged'}
+                                    className={`rounded border p-2 text-[10px] transition-colors ${
+                                      s.status === 'added'
+                                        ? 'border-emerald-500/40 bg-emerald-500/10'
+                                        : s.status === 'removed'
+                                          ? 'border-red-500/40 bg-red-500/10'
+                                          : s.status === 'modified'
+                                            ? 'border-amber-500/40 bg-amber-500/10'
+                                            : isDarkMode
+                                              ? 'border-slate-600 bg-slate-800'
+                                              : 'border-slate-200 bg-slate-50'
+                                    }`}>
+                                    <summary className="flex cursor-pointer items-center justify-between">
+                                      <span className="font-semibold">Step {s.index}</span>
+                                      <span className="uppercase tracking-wide">
+                                        {s.status === 'added'
+                                          ? '新增'
+                                          : s.status === 'removed'
+                                            ? '删除'
+                                            : s.status === 'modified'
+                                              ? '修改'
+                                              : '未变'}
+                                      </span>
+                                    </summary>
+                                    <div className="mt-2 space-y-2">
+                                      {s.status === 'removed' && s.prev && (
+                                        <div className="rounded bg-red-500/10 p-2 text-red-300">
+                                          该步骤已删除 (含 {s.prev.actions.length} 动作)
+                                        </div>
+                                      )}
+                                      {s.status === 'added' && s.next && (
+                                        <div className="rounded bg-emerald-500/10 p-2 text-emerald-300">
+                                          新增步骤 (含 {s.next.actions.length} 动作)
+                                        </div>
+                                      )}
+                                      {s.status !== 'removed' && s.next && s.prev && s.status === 'modified' && (
+                                        <div className="grid gap-2 md:grid-cols-2">
+                                          <div className="space-y-1">
+                                            <div className="text-[10px] font-semibold text-slate-400">旧 (Prev)</div>
+                                            <pre
+                                              className={`max-h-40 overflow-auto rounded border p-2 ${isDarkMode ? 'border-slate-700 bg-slate-900/60 text-slate-300' : 'border-slate-300 bg-white text-slate-600'}`}>
+                                              {prettyMaybe(s.prev.plannerOutput || '') || '(无 plannerOutput)'}
+                                            </pre>
+                                          </div>
+                                          <div className="space-y-1">
+                                            <div className="text-[10px] font-semibold text-slate-400">新 (Next)</div>
+                                            <pre
+                                              className={`max-h-40 overflow-auto rounded border p-2 ${isDarkMode ? 'border-slate-700 bg-slate-900/60 text-slate-300' : 'border-slate-300 bg-white text-slate-600'}`}>
+                                              {prettyMaybe(s.next.plannerOutput || '') || '(无 plannerOutput)'}
+                                            </pre>
+                                          </div>
+                                        </div>
+                                      )}
+                                      {s.status !== 'removed' && s.next && (
+                                        <div>
+                                          <div className="mb-1 text-[10px] font-semibold text-indigo-400">动作差异</div>
+                                          {s.actionChanges && s.actionChanges.length > 0 ? (
+                                            <table className="w-full table-fixed border-collapse overflow-hidden rounded text-[10px]">
+                                              <thead>
+                                                <tr
+                                                  className={
+                                                    isDarkMode
+                                                      ? 'bg-slate-700 text-slate-200'
+                                                      : 'bg-slate-200 text-slate-700'
+                                                  }>
+                                                  <th className="w-10 p-1 text-left">#</th>
+                                                  <th className="w-16 p-1 text-left">状态</th>
+                                                  <th className="w-24 p-1 text-left">类型</th>
+                                                  <th className="p-1 text-left">字段变化</th>
+                                                </tr>
+                                              </thead>
+                                              <tbody>
+                                                {s.actionChanges.map(ac => (
+                                                  <tr
+                                                    key={ac.idx}
+                                                    className={
+                                                      isDarkMode
+                                                        ? 'border-t border-slate-700'
+                                                        : 'border-t border-slate-300'
+                                                    }>
+                                                    <td className="p-1 align-top">{ac.idx}</td>
+                                                    <td className="p-1 align-top">
+                                                      <span
+                                                        className={`rounded px-1 py-0.5 font-mono ${
+                                                          ac.status === 'added'
+                                                            ? 'bg-emerald-600/30 text-emerald-300'
+                                                            : ac.status === 'removed'
+                                                              ? 'bg-red-600/30 text-red-300'
+                                                              : ac.status === 'modified'
+                                                                ? 'bg-amber-600/30 text-amber-300'
+                                                                : 'bg-slate-500/30 text-slate-300'
+                                                        }`}>
+                                                        {ac.status}
+                                                      </span>
+                                                    </td>
+                                                    <td className="p-1 align-top">
+                                                      {ac.prevAction &&
+                                                      ac.nextAction &&
+                                                      ac.prevAction.type !== ac.nextAction.type ? (
+                                                        <span className="font-mono">
+                                                          {ac.prevAction.type} → {ac.nextAction.type}
+                                                        </span>
+                                                      ) : (
+                                                        <span className="font-mono">
+                                                          {ac.prevAction?.type || ac.nextAction?.type}
+                                                        </span>
+                                                      )}
+                                                    </td>
+                                                    <td className="p-1 align-top">
+                                                      {ac.status === 'unchanged' && (
+                                                        <span className="text-slate-500">无变化</span>
+                                                      )}
+                                                      {ac.status !== 'unchanged' &&
+                                                        ac.changedFields &&
+                                                        ac.changedFields.length === 0 &&
+                                                        ac.status !== 'added' &&
+                                                        ac.status !== 'removed' && (
+                                                          <span className="text-slate-500">参数无差异</span>
+                                                        )}
+                                                      {ac.status === 'modified' &&
+                                                        ac.changedFields &&
+                                                        ac.changedFields.length > 0 && (
+                                                          <div className="space-y-0.5">
+                                                            {ac.changedFields.map(f => (
+                                                              <div key={f} className="flex flex-wrap gap-1">
+                                                                <span className="rounded bg-amber-500/30 px-1 py-0.5 font-mono text-amber-200">
+                                                                  {f}
+                                                                </span>
+                                                                <span className="rounded bg-red-500/20 px-1 py-0.5 line-through opacity-80">
+                                                                  {String((ac.prevAction as any)[f] ?? '') || '⌀'}
+                                                                </span>
+                                                                <span className="rounded bg-emerald-600/20 px-1 py-0.5">
+                                                                  {String((ac.nextAction as any)[f] ?? '') || '⌀'}
+                                                                </span>
+                                                              </div>
+                                                            ))}
+                                                          </div>
+                                                        )}
+                                                      {ac.status === 'added' && ac.nextAction && (
+                                                        <div className="flex flex-wrap gap-1">
+                                                          {(['url', 'text', 'selector', 'keys'] as const)
+                                                            .filter(k => (ac.nextAction as any)[k])
+                                                            .map(k => (
+                                                              <span
+                                                                key={k}
+                                                                className="rounded bg-emerald-600/20 px-1 py-0.5 font-mono text-emerald-300">
+                                                                {k}:{String((ac.nextAction as any)[k])}
+                                                              </span>
+                                                            ))}
+                                                        </div>
+                                                      )}
+                                                      {ac.status === 'removed' && ac.prevAction && (
+                                                        <div className="flex flex-wrap gap-1">
+                                                          {(['url', 'text', 'selector', 'keys'] as const)
+                                                            .filter(k => (ac.prevAction as any)[k])
+                                                            .map(k => (
+                                                              <span
+                                                                key={k}
+                                                                className="rounded bg-red-600/20 px-1 py-0.5 font-mono text-red-300 line-through">
+                                                                {k}:{String((ac.prevAction as any)[k])}
+                                                              </span>
+                                                            ))}
+                                                        </div>
+                                                      )}
+                                                    </td>
+                                                  </tr>
+                                                ))}
+                                              </tbody>
+                                            </table>
+                                          ) : (
+                                            <div className="text-slate-500">无动作变化</div>
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </details>
+                                ))}
+                              </div>
+                            </div>
+                          </details>
+                        )}
                       </div>
                     )}
                     {planUpdateStatus.status === 'reject' && (
@@ -389,6 +750,71 @@ const SessionViewer: React.FC<Props> = ({ isDarkMode }) => {
                       <div className="text-red-500">Plan 更新错误: {planUpdateStatus.reason}</div>
                     )}
                   </div>
+                )}
+                {planUpdateDebug.length > 0 && (
+                  <details className="mt-2" open>
+                    <summary className="cursor-pointer text-[11px] font-semibold text-blue-400">
+                      Plan Update 调试
+                    </summary>
+                    <div className="mt-1 space-y-2">
+                      {planUpdateDebug.map((d, i) => (
+                        <div
+                          key={i}
+                          className={`rounded border p-2 ${isDarkMode ? 'border-slate-600 bg-slate-800' : 'border-slate-200 bg-white'}`}>
+                          <div className="mb-1 flex items-center justify-between text-[10px]">
+                            <span className="font-mono">{d.kind}</span>
+                            {typeof d.latencyMs === 'number' && <span className="text-slate-400">{d.latencyMs}ms</span>}
+                          </div>
+                          {d.system && (
+                            <details className="mb-1">
+                              <summary className="cursor-pointer text-[10px] font-semibold text-green-500">
+                                System
+                              </summary>
+                              <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-black/10 p-1 text-[10px] leading-snug dark:bg-black/30">
+                                {d.system}
+                              </pre>
+                            </details>
+                          )}
+                          {d.user && (
+                            <details className="mb-1">
+                              <summary className="cursor-pointer text-[10px] font-semibold text-amber-500">
+                                User
+                              </summary>
+                              <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-black/10 p-1 text-[10px] leading-snug dark:bg-black/30">
+                                {d.user}
+                              </pre>
+                            </details>
+                          )}
+                          {d.raw && (
+                            <details className="mb-1" open>
+                              <summary className="cursor-pointer text-[10px] font-semibold text-blue-500">Raw</summary>
+                              <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-black/10 p-1 text-[10px] leading-snug dark:bg-black/30">
+                                {d.raw}
+                              </pre>
+                            </details>
+                          )}
+                          {d.parsed !== undefined && (
+                            <details>
+                              <summary className="cursor-pointer text-[10px] font-semibold text-purple-500">
+                                Parsed
+                              </summary>
+                              <pre className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap rounded bg-black/10 p-1 text-[10px] leading-snug dark:bg-black/30">
+                                {
+                                  (() => {
+                                    try {
+                                      return JSON.stringify(d.parsed as unknown, null, 2);
+                                    } catch {
+                                      return String(d.parsed);
+                                    }
+                                  })() as string
+                                }
+                              </pre>
+                            </details>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </details>
                 )}
               </div>
               <div className="flex flex-wrap gap-2 pt-2">
@@ -411,6 +837,13 @@ const SessionViewer: React.FC<Props> = ({ isDarkMode }) => {
                             ? '已清除'
                             : ''}
                   </span>
+                )}
+                {planDiff && planUpdateStatus.status === 'ok' && (
+                  <button
+                    onClick={() => setPlanDiff(null)}
+                    className={`rounded-md px-3 py-1 text-xs font-medium ${isDarkMode ? 'bg-slate-700 text-slate-200 hover:bg-slate-600' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}`}>
+                    隐藏Diff
+                  </button>
                 )}
               </div>
             </div>

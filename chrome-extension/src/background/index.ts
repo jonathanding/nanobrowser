@@ -228,30 +228,107 @@ chrome.runtime.onConnect.addListener(port => {
               // Optional updated task flow
               if (message.newTask && typeof message.newTask === 'string' && message.newTask.trim().length > 0) {
                 try {
+                  console.log('[PlanUpdater] Detected newTask variant, starting plan update flow');
                   const startUpdate = Date.now();
                   const { agentModelStore, llmProviderStore, AgentNameEnum } = await import('@extension/storage');
                   const { planUpdaterSystemPromptTemplate } = await import('./agent/prompts/templates/plan_updater');
                   const agentModels = await agentModelStore.getAllAgentModels();
                   const updaterModel = agentModels[AgentNameEnum.PlanUpdater];
                   if (!updaterModel) {
+                    console.log('[PlanUpdater] Skipping: no updater model configured');
                     port.postMessage({ type: 'plan_update_result', status: 'skipped', reason: 'no_model' });
                   } else {
                     const providers = await llmProviderStore.getAllProviders();
                     const providerCfg = providers[updaterModel.provider];
                     if (!providerCfg) {
+                      console.log('[PlanUpdater] Skipping: provider config missing for', updaterModel.provider);
                       port.postMessage({ type: 'plan_update_result', status: 'skipped', reason: 'provider_missing' });
                     } else {
                       const { createChatModel } = await import('./agent/helper');
                       const chat = createChatModel(providerCfg, updaterModel);
                       const system = planUpdaterSystemPromptTemplate;
                       const user = `<original_task>${plan.task}</original_task>\n<new_task>${message.newTask}</new_task>\n<cached_plan_json>${JSON.stringify(plan)}</cached_plan_json>`;
-                      const resp = await chat.invoke([
-                        { role: 'system', content: system },
-                        { role: 'user', content: user },
-                      ]);
+                      console.log('[PlanUpdater] Prepared prompt lengths', {
+                        systemLen: system.length,
+                        userLen: user.length,
+                      });
+                      console.log('[PlanUpdater] Using model', {
+                        provider: updaterModel.provider,
+                        model: updaterModel.modelName,
+                        temperature: updaterModel.parameters?.temperature,
+                        topP: updaterModel.parameters?.topP,
+                      });
+                      // Emit invoke start debug with model/provider info
+                      port.postMessage({
+                        type: 'plan_update_debug',
+                        kind: 'plan_update_invoke_start',
+                        provider: updaterModel.provider,
+                        model: updaterModel.modelName,
+                        temperature: updaterModel.parameters?.temperature,
+                        topP: updaterModel.parameters?.topP,
+                      });
+                      // Emit debug request
+                      port.postMessage({
+                        type: 'plan_update_debug',
+                        kind: 'plan_update_request',
+                        system,
+                        user,
+                        originalTask: plan.task,
+                        newTask: message.newTask,
+                      });
+                      // Timeout wrapper (e.g. 45s)
+                      const timeoutMs = 45000;
+                      console.log('[PlanUpdater] Invoking chat model with timeout', timeoutMs);
+                      const resp = await Promise.race([
+                        chat.invoke([
+                          { role: 'system', content: system },
+                          { role: 'user', content: user },
+                        ]),
+                        new Promise<never>((_, reject) =>
+                          setTimeout(() => reject(new Error('plan_updater_timeout')), timeoutMs),
+                        ),
+                      ]).catch(err => {
+                        console.log('[PlanUpdater] Invoke race rejected', err);
+                        if (err instanceof Error && err.message === 'plan_updater_timeout') {
+                          console.log('[PlanUpdater] Timeout fired after', timeoutMs, 'ms');
+                          port.postMessage({
+                            type: 'plan_update_debug',
+                            kind: 'plan_update_timeout',
+                            timeoutMs,
+                          });
+                          port.postMessage({
+                            type: 'plan_update_result',
+                            status: 'error',
+                            reason: 'timeout',
+                          });
+                        } else {
+                          console.log('[PlanUpdater] Invoke error', err);
+                          port.postMessage({
+                            type: 'plan_update_debug',
+                            kind: 'plan_update_invoke_error',
+                            error: err instanceof Error ? err.message : String(err),
+                          });
+                          port.postMessage({
+                            type: 'plan_update_result',
+                            status: 'error',
+                            reason: err instanceof Error ? err.message : 'invoke_failed',
+                          });
+                        }
+                        throw err; // rethrow to abort further parsing
+                      });
+                      console.log('[PlanUpdater] Received response from model');
                       let text = '';
                       if (typeof resp.content === 'string') text = resp.content;
                       else text = JSON.stringify(resp.content);
+                      console.log('[PlanUpdater] Raw response length', text.length);
+                      const latencyMs = Date.now() - startUpdate;
+                      // Emit raw response debug
+                      port.postMessage({
+                        type: 'plan_update_debug',
+                        kind: 'plan_update_response_raw',
+                        raw: text,
+                        latencyMs,
+                      });
                       interface ParsedUpdatedAction {
                         type: string;
                         selector?: string;
@@ -280,8 +357,16 @@ chrome.runtime.onConnect.addListener(port => {
                       type ParsedResult = ParsedPlanOk | ParsedPlanReject | Record<string, unknown>;
                       let parsed: ParsedResult | undefined;
                       try {
+                        console.log('[PlanUpdater] Attempting to parse JSON');
                         parsed = JSON.parse(text);
+                        console.log(
+                          '[PlanUpdater] Parse success, status=',
+                          typeof parsed === 'object' && parsed !== null && 'status' in parsed
+                            ? (parsed as ParsedResult & { status?: unknown }).status
+                            : 'unknown',
+                        );
                       } catch {
+                        console.log('[PlanUpdater] Parse failed');
                         /* ignore */
                       }
                       if (
@@ -290,6 +375,13 @@ chrome.runtime.onConnect.addListener(port => {
                         (parsed as ParsedPlanOk).plan &&
                         Array.isArray((parsed as ParsedPlanOk).plan.steps)
                       ) {
+                        console.log(
+                          '[PlanUpdater] Parsed OK result with',
+                          (parsed as ParsedPlanOk).plan.steps.length,
+                          'steps',
+                        );
+                        // Preserve original for diff
+                        const originalPlan = JSON.parse(JSON.stringify(plan));
                         // Build new plan object
                         plan = {
                           ...plan,
@@ -310,33 +402,63 @@ chrome.runtime.onConnect.addListener(port => {
                           })),
                         };
                         port.postMessage({
+                          type: 'plan_update_debug',
+                          kind: 'plan_update_response_parsed',
+                          parsed,
+                          latencyMs,
+                        });
+                        port.postMessage({
                           type: 'plan_update_result',
                           status: 'ok',
                           durationMs: Date.now() - startUpdate,
                           changeSummary: (parsed as ParsedPlanOk).change_summary,
+                          originalPlan,
+                          updatedPlan: plan,
                         });
+                        console.log('[PlanUpdater] Sent plan_update_result ok');
                       } else if (parsed && (parsed as ParsedPlanReject).status === 'reject') {
+                        console.log('[PlanUpdater] Parsed reject result');
+                        port.postMessage({
+                          type: 'plan_update_debug',
+                          kind: 'plan_update_response_parsed',
+                          parsed,
+                          latencyMs,
+                        });
                         port.postMessage({
                           type: 'plan_update_result',
                           status: 'reject',
                           reason: (parsed as ParsedPlanReject).reason,
+                          raw: text,
+                          latencyMs,
                         });
+                        console.log('[PlanUpdater] Sent plan_update_result reject');
                         return; // abort replay
                       } else {
+                        console.log('[PlanUpdater] Parsed content invalid or missing, emit parse_failed');
+                        port.postMessage({
+                          type: 'plan_update_debug',
+                          kind: 'plan_update_response_parse_failed',
+                          raw: text,
+                          latencyMs,
+                        });
                         port.postMessage({
                           type: 'plan_update_result',
                           status: 'error',
                           reason: 'parse_failed',
                           raw: text,
+                          latencyMs,
                         });
+                        console.log('[PlanUpdater] Sent plan_update_result error parse_failed');
                       }
                     }
                   }
                 } catch (e) {
+                  console.log('[PlanUpdater] Outer catch triggered', e);
                   port.postMessage({
                     type: 'plan_update_result',
                     status: 'error',
                     reason: e instanceof Error ? e.message : 'update_failed',
+                    latencyMs: Date.now(),
                   });
                 }
               }
